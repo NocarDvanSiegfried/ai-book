@@ -1,10 +1,16 @@
 from fastapi import FastAPI
+from app.db import Base, engine
 from app.routers import recommendations
 
-app = FastAPI(title="AI Book Backend")
+app = FastAPI(title="AI-Book Backend", version="1.1.0")
 
-app.include_router(recommendations.router, prefix="/v1")
+@app.on_event("startup")
+async def on_startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 @app.get("/")
 async def root():
-    return {"message": "AI Book Backend is running"}
+    return {"message": "AI-Book backend OK"}
+
+app.include_router(recommendations.router)

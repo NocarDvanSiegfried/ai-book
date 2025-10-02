@@ -1,13 +1,19 @@
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+class BookIn(BaseModel):
+    title: str
+    author: Optional[str] = None
 
 class RecommendationRequest(BaseModel):
-    user_id: int
-    preferences: List[str]
+    favorites: List[str] = Field(default=[])
+    genres: List[str] = Field(default=[])
+    authors: List[str] = Field(default=[])
 
-class Book(BaseModel):
+class BookOut(BaseModel):
     title: str
-    author: str
+    author: str | None = None
+    reason: str | None = None
 
 class RecommendationResponse(BaseModel):
-    books: List[Book]
+    books: list[BookOut]

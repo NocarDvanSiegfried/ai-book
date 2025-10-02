@@ -1,7 +1,7 @@
-fastapi
-uvicorn[standard]
-sqlalchemy[asyncio]
-asyncpg
-pydantic
-python-dotenv
-alembic
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+sqlalchemy[asyncio]==2.0.29
+pydantic==2.6.4
+python-dotenv==1.0.1
+aiohttp==3.9.5
+aiosqlite==0.19.0

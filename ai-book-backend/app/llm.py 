@@ -1,0 +1,54 @@
+import os, aiohttp
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
+
+async def ask_llm(favorites: list[str], genres: list[str], authors: list[str]) -> list[dict]:
+    """
+    Возвращает список словарей: [{"title": "...", "author": "...", "reason": "..."}]
+    """
+    prompt = (
+        "Ты книжный рекомендатель. Дай 3 новые книги (title + author), "
+        "коротко объясни причину (reason). Формат: JSON-массив объектов "
+        "c полями title, author, reason. Без лишнего текста.\n\n"
+        f"Любимые книги пользователя: {', '.join(favorites) or '—'}\n"
+        f"Жанры: {', '.join(genres) or '—'}\n"
+        f"Авторы: {', '.join(authors) or '—'}\n"
+    )
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a helpful book recommender."},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"}
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                headers=headers, json=payload, timeout=90) as r:
+            data = await r.json()
+            # на всякий случай — мягкий парс
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except Exception:
+                return []
+    import json
+    try:
+        obj = json.loads(content)
+        # допустим {"items":[{...},{...}] } или сразу массив
+        items = obj.get("items", obj)
+        out = []
+        for it in items[:3]:
+            out.append({
+                "title": it.get("title", "").strip(),
+                "author": (it.get("author") or "").strip(),
+                "reason": (it.get("reason") or "").strip()
+            })
+        return [x for x in out if x["title"]]
+    except Exception:
+        return []
