@@ -1,10 +1,16 @@
 from fastapi import FastAPI
-from app.routers import recommendations
+from app.models import RecommendationRequest, RecommendationResponse
+from app.llm_agent import DummyLLM
 
-app = FastAPI(title="AI-Book Backend")
+app = FastAPI(title="AI Book Backend")
 
-app.include_router(recommendations.router)
+llm = DummyLLM()
 
 @app.get("/")
-def root():
-    return {"msg": "AI-Book backend is running"}
+async def root():
+    return {"message": "AI Book Backend is running"}
+
+@app.post("/recommendations", response_model=RecommendationResponse)
+async def recommend(request: RecommendationRequest):
+    books = llm.get_recommendations(request.preferences)
+    return {"books": books}

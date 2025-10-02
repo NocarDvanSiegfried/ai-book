@@ -1,57 +1,39 @@
-import os
 import logging
-import aiohttp
 from aiogram import Bot, Dispatcher, executor, types
-from dotenv import load_dotenv
+import requests
+import os
 
-load_dotenv()
+# Токен бота задаём через переменную окружения TELEGRAM_TOKEN
+API_TOKEN = os.getenv("TELEGRAM_TOKEN")
+BACKEND_URL = "http://127.0.0.1:8000/recommendations"  # на сервере поменяй на http://<ip>:8000/recommendations
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-BACKEND_URL = os.getenv("BACKEND_URL")
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-# ---- Start ----
-@dp.message_handler(commands=["start"])
-async def start_cmd(message: types.Message):
-    await message.answer("👋 Привет! Я AI-Book бот.\n\n"
-                         "Доступные команды:\n"
-                         "/recommend — получить рекомендации\n"
-                         "/quiz — викторина")
+# старт
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Фантастика", "Классика", "Что-то другое")
+    await message.answer("Привет! Выбери жанр:", reply_markup=keyboard)
 
-# ---- Quiz ----
-@dp.message_handler(commands=["quiz"])
-async def quiz_cmd(message: types.Message):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("Вопрос 1", "Вопрос 2")
-    await message.answer("📖 Викторина: выбери вопрос:", reply_markup=kb)
-
-@dp.message_handler(lambda m: m.text.startswith("Вопрос"))
-async def quiz_questions(message: types.Message):
-    if "1" in message.text:
-        await message.answer("❓ Вопрос 1: Какая твоя любимая книга?")
-    elif "2" in message.text:
-        await message.answer("❓ Вопрос 2: Сколько книг ты читаешь в год?")
-
-# ---- Recommend ----
-async def get_recommendations(user_id: int, favorites: list[str]):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{BACKEND_URL}/v1/users/{user_id}/recommendations",
-                                json={"favorites": favorites}) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            return {"error": f"Backend error {resp.status}"}
-
-@dp.message_handler(commands=["recommend"])
-async def recommend_cmd(message: types.Message):
-    user_id = message.from_user.id
-    recs = await get_recommendations(user_id, ["Маленький принц", "Гарри Поттер"])
-    if "recommendations" in recs:
-        await message.answer("📚 Вот что я советую:\n" + recs["recommendations"])
+# обработка жанров
+@dp.message_handler(lambda message: message.text in ["Фантастика", "Классика", "Что-то другое"])
+async def handle_genre(message: types.Message):
+    prefs = [message.text.lower()]
+    response = requests.post(BACKEND_URL, json={"user_id": message.from_user.id, "preferences": prefs})
+    
+    if response.status_code == 200:
+        data = response.json()
+        books = data.get("books", [])
+        if books:
+            text = "\n".join([f"📖 {b['title']} — {b['author']}" for b in books])
+            await message.answer(f"Вот рекомендации:\n{text}")
+        else:
+            await message.answer("🤔 Пока нет рекомендаций")
     else:
-        await message.answer("⚠️ Не удалось получить рекомендации.")
+        await message.answer("⚠️ Ошибка: не удалось получить рекомендации")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)

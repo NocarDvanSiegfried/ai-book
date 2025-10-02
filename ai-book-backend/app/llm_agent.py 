@@ -1,0 +1,18 @@
+class DummyLLM:
+    def get_recommendations(self, prefs):
+        # простая заглушка вместо ChatGPT
+        if "фантастика" in prefs:
+            return [
+                {"title": "1984", "author": "Дж. Оруэлл"},
+                {"title": "Марсианин", "author": "Энди Уэйр"}
+            ]
+        elif "классика" in prefs:
+            return [
+                {"title": "Мастер и Маргарита", "author": "М. Булгаков"},
+                {"title": "Преступление и наказание", "author": "Ф. Достоевский"}
+            ]
+        else:
+            return [
+                {"title": "Алхимик", "author": "Пауло Коэльо"},
+                {"title": "Три товарища", "author": "Эрих Мария Ремарк"}
+            ]
