@@ -1,29 +1,35 @@
-from fastapi import APIRouter, Depends, Path
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.db import SessionLocal
-from app import crud, schemas
-from datetime import datetime
+from fastapi import APIRouter
+from pydantic import BaseModel
+import os, aiohttp
 
 router = APIRouter()
 
-async def get_db():
-    async with SessionLocal() as session:
-        yield session
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
 
-@router.post("/v1/users/{user_id}/recommendations", response_model=schemas.RecommendationOut)
-async def recommend_books(user_id: int = Path(...), db: AsyncSession = Depends(get_db)):
-    books = await crud.get_books(db, limit=5)
+class BookPref(BaseModel):
+    favorites: list[str] = []
 
-    # пока делаем мок — реальная логика: учитывать профиль, звать LLM (OpenRouter)
-    rec_books = []
-    for b in books:
-        rec_books.append({
-            "id": b.id,
-            "title": b.title,
-            "description": b.description,
-            "cover_url": b.cover_url,
-            "authors": b.authors_rel.name if b.authors_rel else "",
-            "reason": "Рекомендуем, так как жанры совпадают"
-        })
+async def query_llm(user_books: list[str]) -> str:
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": OPENROUTER_MODEL,
+            "messages": [
+                {"role": "system", "content": "Ты умный ассистент по книгам."},
+                {"role": "user", "content": f"Мои любимые книги: {', '.join(user_books)}. Посоветуй 3 новых книги."}
+            ],
+        }
+        async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                headers=headers, json=payload) as resp:
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
 
-    return {"userId": user_id, "books": rec_books, "generated_at": datetime.utcnow()}
+@router.post("/v1/users/{user_id}/recommendations")
+async def recommend_books(user_id: int, prefs: BookPref):
+    # здесь можно сохранять в БД предпочтения
+    recommendations = await query_llm(prefs.favorites)
+    return {"user_id": user_id, "recommendations": recommendations}
