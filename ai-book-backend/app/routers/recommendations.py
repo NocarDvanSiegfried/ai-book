@@ -1,42 +1,92 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.db import AsyncSessionLocal, User, Book, Recommendation
-from app.models import RecommendationRequest, RecommendationResponse, BookOut
-from app.llm import ask_llm
+import os, json, aiohttp
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException
+from dotenv import load_dotenv
+
+load_dotenv()  # подхватить /root/ai-book/ai-book-backend/.env
 
 router = APIRouter()
 
-async def get_db():
-    async with AsyncSessionLocal() as s:
-        yield s
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
+if not OPENROUTER_API_KEY:
+    # пусть сервис поднимется, но запросы вернут 500 с нормальной ошибкой
+    pass
+
+class Prefs(BaseModel):
+    favorites: List[str] = Field(default_factory=list)
+    genres:    List[str] = Field(default_factory=list)
+    authors:   List[str] = Field(default_factory=list)
+
+class BookOut(BaseModel):
+    title:  str
+    author: Optional[str] = None
+    reason: Optional[str] = None
+
+class RecommendationResponse(BaseModel):
+    books: List[BookOut]
+
+PROMPT = """Ты — помощник по книгам.
+На вход: любимые книги, жанры, авторы.
+Верни РОВНО JSON массив объектов c полями title, author, reason (без пояснений и текста вокруг).
+Пример:
+[
+  {"title": "Дюна", "author": "Фрэнк Герберт", "reason": "эпическая НФ"},
+  {"title": "1984", "author": "Джордж Оруэлл", "reason": "антиутопия"}
+]
+Теперь сгенерируй 5 рекомендаций по пользователю:
+Любимые книги: {favorites}
+Жанры: {genres}
+Авторы: {authors}
+"""
+
+async def call_llm(prefs: Prefs) -> List[BookOut]:
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY не задан в .env backend-а")
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": "Ты умный ассистент по книгам."},
+            {"role": "user",   "content": PROMPT.format(
+                favorites=", ".join(prefs.favorites) or "-",
+                genres=", ".join(prefs.genres) or "-",
+                authors=", ".join(prefs.authors) or "-",
+            )}
+        ],
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with aiohttp.ClientSession() as s:
+        async with s.post("https://openrouter.ai/api/v1/chat/completions",
+                          headers=headers, json=payload) as r:
+            if r.status >= 400:
+                text = await r.text()
+                raise HTTPException(status_code=502, detail=f"OpenRouter {r.status}: {text}")
+            data = await r.json()
+
+    content = data["choices"][0]["message"]["content"]
+    # пытаемся разобрать JSON из ответа
+    try:
+        items = json.loads(content)
+        out = []
+        for it in items:
+            out.append(BookOut(
+                title=str(it.get("title", "")).strip(),
+                author=(it.get("author") or None),
+                reason=(it.get("reason") or None),
+            ))
+        return out
+    except Exception:
+        # fallback — если модель прислала текст, а не JSON
+        return [BookOut(title=line.strip()) for line in content.split("\n") if line.strip()][:5]
 
 @router.post("/v1/users/{user_id}/recommendations", response_model=RecommendationResponse)
-async def recommend(user_id: int, payload: RecommendationRequest, db: AsyncSession = Depends(get_db)):
-    # upsert user (минимально)
-    user = await db.get(User, user_id)
-    if not user:
-        user = User(id=user_id)
-        db.add(user)
-
-    # LLM
-    llm_books = await ask_llm(payload.favorites, payload.genres, payload.authors)
-    out: list[BookOut] = []
-
-    # сохранение в БД и выдача
-    rank = 1
-    for it in llm_books:
-        # простая дедупликация по title
-        q = await db.execute(select(Book).where(Book.title == it["title"]))
-        book = q.scalar_one_or_none()
-        if not book:
-            book = Book(title=it["title"], authors=it.get("author"))
-            db.add(book)
-            await db.flush()
-        rec = Recommendation(user_id=user_id, book_id=book.id, rank=rank, reason=it.get("reason"))
-        db.add(rec)
-        out.append(BookOut(title=book.title, author=book.authors, reason=rec.reason))
-        rank += 1
-
-    await db.commit()
-    return RecommendationResponse(books=out)
+async def recommend(user_id: int, prefs: Prefs):
+    books = await call_llm(prefs)
+    return {"books": books}
