@@ -1,18 +1,35 @@
-class DummyLLM:
-    def get_recommendations(self, prefs):
-        # простая заглушка вместо ChatGPT
-        if "фантастика" in prefs:
-            return [
-                {"title": "1984", "author": "Дж. Оруэлл"},
-                {"title": "Марсианин", "author": "Энди Уэйр"}
-            ]
-        elif "классика" in prefs:
-            return [
-                {"title": "Мастер и Маргарита", "author": "М. Булгаков"},
-                {"title": "Преступление и наказание", "author": "Ф. Достоевский"}
-            ]
-        else:
-            return [
-                {"title": "Алхимик", "author": "Пауло Коэльо"},
-                {"title": "Три товарища", "author": "Эрих Мария Ремарк"}
-            ]
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
+
+# Подгружаем .env
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
+
+MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
+
+
+async def get_recommendations(user_input: str) -> list[str]:
+    """
+    Запрашивает рекомендации у LLM через OpenRouter.
+    """
+    completion = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": "Ты книжный советчик. Дай список из 3 книг, которые могут понравиться пользователю. Формат: одна книга в строке."
+            },
+            {
+                "role": "user",
+                "content": f"Запрос: {user_input}"
+            }
+        ],
+    )
+
+    text = completion.choices[0].message.content.strip()
+    return text.splitlines()
