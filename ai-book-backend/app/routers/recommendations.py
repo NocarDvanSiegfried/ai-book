@@ -1,92 +1,64 @@
-import os, json, aiohttp
-from typing import List, Optional
-from pydantic import BaseModel, Field
+# app/routers/recommendations.py
 from fastapi import APIRouter, HTTPException
-from dotenv import load_dotenv
-
-load_dotenv()  # подхватить /root/ai-book/ai-book-backend/.env
+from pydantic import BaseModel
+import os, aiohttp, asyncio
 
 router = APIRouter()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
-if not OPENROUTER_API_KEY:
-    # пусть сервис поднимется, но запросы вернут 500 с нормальной ошибкой
-    pass
 
-class Prefs(BaseModel):
-    favorites: List[str] = Field(default_factory=list)
-    genres:    List[str] = Field(default_factory=list)
-    authors:   List[str] = Field(default_factory=list)
+class BookPref(BaseModel):
+    favorites: list[str] = []
+    genres: list[str] = []
+    authors: list[str] = []
 
-class BookOut(BaseModel):
-    title:  str
-    author: Optional[str] = None
-    reason: Optional[str] = None
-
-class RecommendationResponse(BaseModel):
-    books: List[BookOut]
-
-PROMPT = """Ты — помощник по книгам.
-На вход: любимые книги, жанры, авторы.
-Верни РОВНО JSON массив объектов c полями title, author, reason (без пояснений и текста вокруг).
-Пример:
-[
-  {"title": "Дюна", "author": "Фрэнк Герберт", "reason": "эпическая НФ"},
-  {"title": "1984", "author": "Джордж Оруэлл", "reason": "антиутопия"}
-]
-Теперь сгенерируй 5 рекомендаций по пользователю:
-Любимые книги: {favorites}
-Жанры: {genres}
-Авторы: {authors}
-"""
-
-async def call_llm(prefs: Prefs) -> List[BookOut]:
+async def query_llm(user_books: list[str], genres: list[str], authors: list[str]) -> str:
     if not OPENROUTER_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY не задан в .env backend-а")
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY is not set")
 
+    prompt = (
+        "Ты книжный рекомендатор. На основе предпочтений предложи 3 новые книги в формате:\n"
+        "1) Название — Автор (жанр)\n"
+        "2) ...\n"
+        "3) ...\n\n"
+        f"Любимые книги: {', '.join(user_books) or '—'}\n"
+        f"Жанры: {', '.join(genres) or '—'}\n"
+        f"Авторы: {', '.join(authors) or '—'}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        # опционально, но полезно:
+        "HTTP-Referer": "http://45.80.228.186/",
+        "X-Title": "ai-book-backend",
+    }
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [
             {"role": "system", "content": "Ты умный ассистент по книгам."},
-            {"role": "user",   "content": PROMPT.format(
-                favorites=", ".join(prefs.favorites) or "-",
-                genres=", ".join(prefs.genres) or "-",
-                authors=", ".join(prefs.authors) or "-",
-            )}
+            {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
     }
 
-    async with aiohttp.ClientSession() as s:
-        async with s.post("https://openrouter.ai/api/v1/chat/completions",
-                          headers=headers, json=payload) as r:
-            if r.status >= 400:
-                text = await r.text()
-                raise HTTPException(status_code=502, detail=f"OpenRouter {r.status}: {text}")
-            data = await r.json()
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers, json=payload
+        ) as resp:
+            text = await resp.text()
+            # если не 200 — отдадим понятное сообщение наружу
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail=f"OpenRouter {resp.status}: {text}")
+            data = await resp.json()
+            try:
+                return data["choices"][0]["message"]["content"]
+            except Exception:
+                raise HTTPException(status_code=502, detail=f"OpenRouter bad payload: {text}")
 
-    content = data["choices"][0]["message"]["content"]
-    # пытаемся разобрать JSON из ответа
-    try:
-        items = json.loads(content)
-        out = []
-        for it in items:
-            out.append(BookOut(
-                title=str(it.get("title", "")).strip(),
-                author=(it.get("author") or None),
-                reason=(it.get("reason") or None),
-            ))
-        return out
-    except Exception:
-        # fallback — если модель прислала текст, а не JSON
-        return [BookOut(title=line.strip()) for line in content.split("\n") if line.strip()][:5]
-
-@router.post("/v1/users/{user_id}/recommendations", response_model=RecommendationResponse)
-async def recommend(user_id: int, prefs: Prefs):
-    books = await call_llm(prefs)
-    return {"books": books}
+@router.post("/v1/users/{user_id}/recommendations")
+async def recommend_books(user_id: int, prefs: BookPref):
+    recs = await query_llm(prefs.favorites, prefs.genres, prefs.authors)
+    return {"user_id": user_id, "recommendations": recs}
