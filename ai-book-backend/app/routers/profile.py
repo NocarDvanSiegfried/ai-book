@@ -4,7 +4,7 @@ from app.db import get_profile, upsert_profile
 
 router = APIRouter(prefix="/v1", tags=["profile"])
 
-class ProfileIn(BaseModel):
+class ProfilePayload(BaseModel):
     username: str | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -13,22 +13,21 @@ class ProfileIn(BaseModel):
     preferred_authors: list[str] = Field(default_factory=list)
 
 @router.get("/users/{user_id}/profile")
-async def get_user_profile(user_id: int):
-    prof = await get_profile(user_id)
-    if not prof:
-        # пусто — так и скажем клиенту
-        raise HTTPException(404, "Profile not found")
-    return prof
+async def read_profile(user_id:int):
+    p = await get_profile(user_id)
+    if not p:
+        raise HTTPException(404, "profile not found")
+    return p
 
 @router.put("/users/{user_id}/profile")
-async def put_user_profile(user_id: int, body: ProfileIn):
+async def write_profile(user_id:int, payload: ProfilePayload):
     await upsert_profile(
         user_id=user_id,
-        username=body.username,
-        first_name=body.first_name,
-        last_name=body.last_name,
-        lang=body.lang,
-        genres=body.preferred_genres,
-        authors=body.preferred_authors,
+        username=payload.username,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        lang=payload.lang,
+        genres=payload.preferred_genres,
+        authors=payload.preferred_authors,
     )
     return {"ok": True}
