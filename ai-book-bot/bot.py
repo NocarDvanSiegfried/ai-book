@@ -1,28 +1,39 @@
-import os, requests
+# bot.py
+import os
+import requests
 from aiogram import Bot, Dispatcher, executor, types
 
-API_TOKEN   = os.getenv("TELEGRAM_TOKEN")  # должен быть задан
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+# === Настройки ===
+API_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-if not API_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set")
+# Базовый URL бэкенда: принимаем и с /v1, и без /v1
+_BASE = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+API_V1 = _BASE if _BASE.endswith("/v1") else f"{_BASE}/v1"
 
+def api(path: str) -> str:
+    # path должен начинаться со слеша: "/users/..."
+    return f"{API_V1}{path}"
+
+# === Инициализация бота ===
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
+# === Клавиатура ===
 def main_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📚 Рекомендации", "🧩 Викторина", "👤 Профиль")
     return kb
 
-@dp.message_handler(commands=['start'])
+@dp.message_handler(commands=["start"])
 async def start(message: types.Message):
     await message.answer("Привет! Выбери действие:", reply_markup=main_kb())
 
-# -------- Профиль --------
+# ==========================
+#          Профиль
+# ==========================
 @dp.message_handler(lambda m: m.text == "👤 Профиль")
 async def profile_show(message: types.Message):
-    url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/profile"
+    url = api(f"/users/{message.from_user.id}/profile")
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 404:
@@ -41,13 +52,17 @@ async def profile_show(message: types.Message):
     except Exception as e:
         await message.answer(f"Не удалось получить профиль: {e}")
 
-# -------- Рекомендации --------
+# ==========================
+#       Рекомендации
+# ==========================
 user_session = {}  # user_id -> dict
 
 @dp.message_handler(lambda m: m.text == "📚 Рекомендации")
 async def rec_start(message: types.Message):
     user_session[message.from_user.id] = {"step": "books"}
-    await message.answer("Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)")
+    await message.answer(
+        "Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)"
+    )
 
 @dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "books")
 async def rec_books(message: types.Message):
@@ -66,17 +81,20 @@ async def rec_genres(message: types.Message):
 @dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "authors")
 async def rec_authors(message: types.Message):
     s = user_session[message.from_user.id]
-    s["authors"] = [] if message.text.strip() == "-" else [x.strip() for x in message.text.split(",") if x.strip()]
+    s["authors"] = [] if message.text.strip() == "-" else [
+        x.strip() for x in message.text.split(",") if x.strip()
+    ]
     s["step"] = None
     await message.answer("Готовлю рекомендации…")
+
     try:
-        url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/recommendations"
+        rec_url = api(f"/users/{message.from_user.id}/recommendations")
         payload = {
             "favorites": s.get("favorites", []),
             "genres": s.get("genres", []),
             "authors": s.get("authors", []),
         }
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(rec_url, json=payload, timeout=60)
         r.raise_for_status()
         data = r.json()
         books = data.get("books", [])
@@ -84,18 +102,23 @@ async def rec_authors(message: types.Message):
             await message.answer("Пока нечего посоветовать 😔")
             return
 
-        # Сохраняем профиль
-        prof_url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/profile"
+        # Сохраняем профиль предпочтений, чтобы «👤 Профиль» был не пуст
+        prof_url = api(f"/users/{message.from_user.id}/profile")
         try:
-            _ = requests.put(prof_url, json={
-                "username": message.from_user.username,
-                "first_name": message.from_user.first_name,
-                "last_name": message.from_user.last_name,
-                "lang": "ru",
-                "preferred_genres": s.get("genres", []),
-                "preferred_authors": s.get("authors", []),
-            }, timeout=10)
+            _ = requests.put(
+                prof_url,
+                json={
+                    "username": message.from_user.username,
+                    "first_name": message.from_user.first_name,
+                    "last_name": message.from_user.last_name,
+                    "lang": "ru",
+                    "preferred_genres": s.get("genres", []),
+                    "preferred_authors": s.get("authors", []),
+                },
+                timeout=10,
+            )
         except Exception:
+            # не валим основной сценарий, если профиль не сохранился
             pass
 
         lines = []
@@ -110,7 +133,9 @@ async def rec_authors(message: types.Message):
     except Exception as e:
         await message.answer(f"Ошибка запроса: {e}")
 
-# -------- Викторина --------
+# ==========================
+#         Викторина
+# ==========================
 quiz_state = {}  # user_id -> {"q": int, "q1": str}
 
 @dp.message_handler(lambda m: m.text == "🧩 Викторина")
@@ -130,13 +155,14 @@ async def quiz_q2(message: types.Message):
     st = quiz_state[message.from_user.id]
     try:
         n = int(message.text.strip())
-    except:
+    except Exception:
         await message.answer("Нужно число. Например: 5")
         return
+
     try:
-        url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/quiz"
+        quiz_url = api(f"/users/{message.from_user.id}/quiz")
         payload = {"q1_favorite_book": st["q1"], "q2_books_per_year": n}
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(quiz_url, json=payload, timeout=10)
         r.raise_for_status()
     except Exception as e:
         await message.answer(f"Не удалось сохранить результаты викторины: {e}")
@@ -145,5 +171,6 @@ async def quiz_q2(message: types.Message):
 
     await message.answer("Супер! Теперь нажми «📚 Рекомендации» и получи подборку.", reply_markup=main_kb())
 
+# === Точка входа ===
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
