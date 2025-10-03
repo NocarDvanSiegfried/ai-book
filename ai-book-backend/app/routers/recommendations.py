@@ -1,43 +1,44 @@
 # app/routers/recommendations.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-import os, aiohttp, asyncio
+import os, aiohttp, asyncio, json, re
+from typing import List, Optional
 
 router = APIRouter(prefix="/v1", tags=["recommendations"])
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3.1:free")
-
 if not OPENROUTER_API_KEY:
     raise RuntimeError("OPENROUTER_API_KEY is not set")
 
 class BookPref(BaseModel):
-    favorites: list[str] = Field(default_factory=list)
-    genres: list[str] = Field(default_factory=list)
-    authors: list[str] = Field(default_factory=list)
+    favorites: List[str] = Field(default_factory=list)
+    genres: List[str] = Field(default_factory=list)
+    authors: List[str] = Field(default_factory=list)
 
 class BookOut(BaseModel):
     title: str
-    author: str | None = None
-    reason: str | None = None
+    author: Optional[str] = None
+    reason: Optional[str] = None
 
 class RecResponse(BaseModel):
-    books: list[BookOut]
+    books: List[BookOut]
 
 PROMPT = (
     "Ты книжный ассистент. Дай 5 рекомендаций.\n"
     "Любимые книги: {favorites}\n"
     "Жанры: {genres}\n"
     "Авторы: {authors}\n"
-    "Ответ в JSON-массиве объектов с полями title, author, reason без лишнего текста."
+    "Ответ строго в JSON-массиве объектов с полями title, author, reason без лишнего текста."
 )
 
-async def _call_llm(prefs: BookPref) -> list[BookOut]:
+async def _call_llm(prefs: BookPref) -> List[BookOut]:
     prompt_text = PROMPT.format(
         favorites=", ".join(prefs.favorites) or "-",
         genres=", ".join(prefs.genres) or "-",
         authors=", ".join(prefs.authors) or "-",
     )
+
     async with aiohttp.ClientSession() as session:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -59,25 +60,30 @@ async def _call_llm(prefs: BookPref) -> list[BookOut]:
 
     content = data["choices"][0]["message"]["content"]
 
-    # Лояльный парсер: пробуем вытащить JSON даже если модель добавила текст
-    import json, re
-    match = re.search(r"\[.*\]", content, re.S)
-    raw = match.group(0) if match else content
+    # Вытянуть JSON даже если модель добавила текст
+    m = re.search(r"\[.*\]", content, re.S)
+    raw = m.group(0) if m else content
     try:
         arr = json.loads(raw)
     except Exception:
-        # запасной вариант – сделать список строк рекомендаций
+        # fallback: список по строкам
         lines = [l.strip("-• \n") for l in content.splitlines() if l.strip()]
         arr = [{"title": l} for l in lines[:5]]
 
-    out: list[BookOut] = []
+    out: List[BookOut] = []
     for it in arr:
-        # мягкий доступ к ключам, чтобы не ловить KeyError
-        title = (it.get("title") if isinstance(it, dict) else str(it)).strip()
-        if not title:
-            continue
-        author = (it.get("author") if isinstance(it, dict) else None) or None
-        reason = (it.get("reason") if isinstance(it, dict) else None) or None
+        if isinstance(it, dict):
+            title = (it.get("title") or "").strip()
+            if not title:
+                continue
+            author = (it.get("author") or None)
+            reason = (it.get("reason") or None)
+        else:
+            title = str(it).strip()
+            if not title:
+                continue
+            author = None
+            reason = None
         out.append(BookOut(title=title, author=author, reason=reason))
     return out[:5]
 
