@@ -1,4 +1,3 @@
-cat >/root/ai-book/ai-book-backend/app/routers/recommendations.py <<'PY'
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import os, aiohttp, json
@@ -58,7 +57,7 @@ async def call_llm(prefs: Prefs) -> list[dict]:
             data = json.loads(text)
             content = data["choices"][0]["message"]["content"]
 
-    # Парсим JSON из content
+    # Попробуем распарсить JSON
     try:
         parsed = json.loads(content)
         if isinstance(parsed, list):
@@ -70,7 +69,7 @@ async def call_llm(prefs: Prefs) -> list[dict]:
         else:
             raise ValueError("Unexpected JSON type")
     except Exception:
-        # Фолбэк-эвристика, если пришёл текст
+        # Фолбэк, если пришёл не-JSON
         items, seen = [], set()
         for line in content.splitlines():
             line = line.strip("-• \t")
@@ -113,4 +112,3 @@ async def call_llm(prefs: Prefs) -> list[dict]:
 async def recommend(user_id: int, prefs: Prefs):
     books = await call_llm(prefs)
     return {"user_id": user_id, "books": books}
-PY
