@@ -1,9 +1,8 @@
+# ai-book-bot/bot.py
 import os, requests
 from aiogram import Bot, Dispatcher, executor, types
 
 API_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not API_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set")
 
 _BASE = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 API_V1 = _BASE if _BASE.endswith("/v1") else f"{_BASE}/v1"
@@ -19,9 +18,18 @@ def main_kb():
     kb.add("📚 Рекомендации", "🧩 Викторина", "👤 Профиль")
     return kb
 
+# ---- временное состояние мастера рекомендаций (если понадобится)
+user_session: dict[int, dict] = {}
+quiz_state: dict[int, dict] = {}
+
+async def send(chat, text):
+    await chat.answer(text, reply_markup=main_kb())
+
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
-    await message.answer("Привет! Выбери действие:", reply_markup=main_kb())
+    user_session.pop(message.from_user.id, None)
+    quiz_state.pop(message.from_user.id, None)
+    await send(message, "Привет! Выбери действие:")
 
 # ---------- Профиль ----------
 @dp.message_handler(lambda m: m.text == "👤 Профиль")
@@ -30,7 +38,7 @@ async def profile_show(message: types.Message):
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 404:
-            await message.answer("Профиль пока пуст. Пройди «📚 Рекомендации» или «🧩 Викторина».")
+            await send(message, "Профиль пока пуст. Пройди «📚 Рекомендации» или «🧩 Викторина».")
             return
         r.raise_for_status()
         p = r.json()
@@ -41,114 +49,132 @@ async def profile_show(message: types.Message):
             f"Жанры: {', '.join(p.get('preferred_genres', [])) or '-'}\n"
             f"Авторы: {', '.join(p.get('preferred_authors', [])) or '-'}"
         )
-        await message.answer(txt)
+        await send(message, txt)
     except Exception as e:
-        await message.answer(f"Не удалось получить профиль: {e}")
+        await send(message, f"Не удалось получить профиль: {e}")
 
-# ---------- Быстрые рекомендации без опроса, если есть данные ----------
-def _recommend_with(prefs: dict) -> list[dict]:
-    """синхронный вызов бэкенда для простоты"""
-    url = api(f"/users/{prefs['user_id']}/recommendations")
-    payload = {
-        "favorites": prefs.get("favorites", []),
-        "genres": prefs.get("genres", []),
-        "authors": prefs.get("authors", []),
-    }
-    r = requests.post(url, json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json().get("books", [])
-
-def _try_build_prefs_from_backend(uid: int) -> dict | None:
-    """Пытаемся собрать prefs из профиля/викторины."""
-    # 1) профиль
+# ---------- Рекомендации ----------
+def _safe_get(url, timeout=8):
     try:
-        pr = requests.get(api(f"/users/{uid}/profile"), timeout=5)
-        if pr.status_code == 200:
-            p = pr.json()
-            return {
-                "user_id": uid,
-                "favorites": [],  # возьмём из квиза ниже, если будет
-                "genres": p.get("preferred_genres", []),
-                "authors": p.get("preferred_authors", []),
-            }
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
     except Exception:
-        pass
-    # 2) квиз
-    try:
-        qz = requests.get(api(f"/users/{uid}/quiz"), timeout=5)
-        if qz.status_code == 200:
-            q = qz.json()
-            answers = q.get("answers", {}) or {}
-            genres = answers.get("favorite_genres", [])
-            fav = q.get("q1_favorite_book")
-            return {
-                "user_id": uid,
-                "favorites": [fav] if fav else [],
-                "genres": genres,
-                "authors": [],
-            }
-    except Exception:
-        pass
-    return None
-
-# ---------- Рекомендации (диалоговый режим по-прежнему есть как fallback) ----------
-user_session = {}
+        return None
 
 @dp.message_handler(lambda m: m.text == "📚 Рекомендации")
-async def rec_start(message: types.Message):
+async def rec_entry(message: types.Message):
     uid = message.from_user.id
-    # Сначала попробуем быстрый путь
-    prefs = _try_build_prefs_from_backend(uid)
-    if prefs and (prefs["genres"] or prefs["favorites"] or prefs["authors"]):
-        try:
-            books = _recommend_with(prefs)
-            if books:
-                lines=[]
-                for b in books:
-                    line = f"📖 {b.get('title')}"
-                    if b.get("author"):
-                        line += f" — {b['author']}"
-                    if b.get("reason"):
-                        line += f"\n🛈 {b['reason']}"
-                    lines.append(line)
-                await message.answer("\n\n".join(lines))
-                return
-        except Exception as e:
-            await message.answer(f"Не удалось получить рекомендации по профилю/викторине: {e}")
+    # Пытаемся собрать данные автоматически
+    quiz = _safe_get(api(f"/users/{uid}/quiz"))
+    prof = _safe_get(api(f"/users/{uid}/profile"))
 
-    # если нет данных — запускаем мастер
+    favorites = []
+    genres = []
+    authors = []
+
+    if quiz and quiz.get("q1_favorite_book"):
+        favorites = [quiz["q1_favorite_book"]]
+
+    if prof:
+        genres = prof.get("preferred_genres", []) or []
+        authors = prof.get("preferred_authors", []) or []
+
+    # Если есть хотя бы что-то — попробуем сразу дать рекомендации
+    if favorites or genres or authors:
+        await send(message, "Готовлю рекомендации…")
+        try:
+            url = api(f"/users/{uid}/recommendations")
+            payload = {"favorites": favorites, "genres": genres, "authors": authors}
+            r = requests.post(url, json=payload, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            books = data.get("books", [])
+            if not books:
+                await send(message, "Пока нечего посоветовать 😔")
+                return
+
+            # Автообновим профиль предпочтениями (если есть жанры/авторы)
+            if genres or authors:
+                prof_url = api(f"/users/{uid}/profile")
+                try:
+                    _ = requests.put(prof_url, json={
+                        "username": message.from_user.username,
+                        "first_name": message.from_user.first_name,
+                        "last_name": message.from_user.last_name,
+                        "lang": "ru",
+                        "preferred_genres": genres,
+                        "preferred_authors": authors,
+                    }, timeout=8)
+                except Exception:
+                    pass
+
+            lines = []
+            for b in books:
+                line = f"📖 {b.get('title')}"
+                if b.get("author"):
+                    line += f" — {b['author']}"
+                if b.get("reason"):
+                    line += f"\n🛈 {b['reason']}"
+                lines.append(line)
+            await send(message, "\n\n".join(lines))
+            return
+        except Exception as e:
+            await send(message, f"Ошибка запроса: {e}")
+
+    # Иначе — короткий мастер (3 вопроса)
+    user_session.pop(uid, None)
     user_session[uid] = {"step": "books"}
-    await message.answer("Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)")
+    await send(message, "Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)")
 
 @dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "books")
 async def rec_books(message: types.Message):
-    s = user_session[message.from_user.id]
-    s["favorites"] = [x.strip() for x in message.text.split(",") if x.strip()]
+    uid = message.from_user.id
+    s = user_session[uid]
+    s["favorites"] = [x.strip() for x in (message.text or "").split(",") if x.strip()]
     s["step"] = "genres"
-    await message.answer("Окей! Теперь жанры (через запятую): фантастика, классика, детектив ...")
+    await send(message, "Окей! Теперь жанры (через запятую): фантастика, классика, детектив ...")
 
 @dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "genres")
 async def rec_genres(message: types.Message):
-    s = user_session[message.from_user.id]
-    s["genres"] = [x.strip() for x in message.text.split(",") if x.strip()]
+    uid = message.from_user.id
+    s = user_session[uid]
+    s["genres"] = [x.strip() for x in (message.text or "").split(",") if x.strip()]
     s["step"] = "authors"
-    await message.answer("И пару любимых авторов (через запятую), или '-' если нет:")
+    await send(message, "И пару любимых авторов (через запятую), или '-' если нет:")
 
 @dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "authors")
 async def rec_authors(message: types.Message):
     uid = message.from_user.id
+    txt = (message.text or "").strip()
+    if txt in ("📚 Рекомендации", "🧩 Викторина", "👤 Профиль", "/start", "/cancel"):
+        return
+
     s = user_session[uid]
-    s["authors"] = [] if message.text.strip() == "-" else [x.strip() for x in message.text.split(",") if x.strip()]
+    s["authors"] = [] if txt == "-" else [x.strip() for x in txt.split(",") if x.strip()]
     s["step"] = None
-    await message.answer("Готовлю рекомендации…")
+    await send(message, "Готовлю рекомендации…")
     try:
-        books = _recommend_with({"user_id": uid,
-                                 "favorites": s.get("favorites", []),
-                                 "genres": s.get("genres", []),
-                                 "authors": s.get("authors", [])})
-        # обновим профиль предпочтениями
+        url = api(f"/users/{uid}/recommendations")
+        payload = {
+            "favorites": s.get("favorites", []),
+            "genres": s.get("genres", []),
+            "authors": s.get("authors", []),
+        }
+        r = requests.post(url, json=payload, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        books = data.get("books", [])
+        if not books:
+            await send(message, "Пока нечего посоветовать 😔")
+            return
+
+        # Сохраняем предпочтения в профиль
+        prof_url = api(f"/users/{uid}/profile")
         try:
-            requests.put(api(f"/users/{uid}/profile"), json={
+            _ = requests.put(prof_url, json={
                 "username": message.from_user.username,
                 "first_name": message.from_user.first_name,
                 "last_name": message.from_user.last_name,
@@ -158,10 +184,8 @@ async def rec_authors(message: types.Message):
             }, timeout=8)
         except Exception:
             pass
-        if not books:
-            await message.answer("Пока нечего посоветовать 😔")
-            return
-        lines=[]
+
+        lines = []
         for b in books:
             line = f"📖 {b.get('title')}"
             if b.get("author"):
@@ -169,104 +193,47 @@ async def rec_authors(message: types.Message):
             if b.get("reason"):
                 line += f"\n🛈 {b['reason']}"
             lines.append(line)
-        await message.answer("\n\n".join(lines))
+        await send(message, "\n\n".join(lines))
     except Exception as e:
-        await message.answer(f"Ошибка запроса: {e}")
+        await send(message, f"Ошибка запроса: {e}")
+    finally:
+        user_session.pop(uid, None)
 
-# ---------- Викторина 2.0 ----------
-quiz_state = {}  # user_id -> {"q": int, ...}
-
-QUESTS = [
-    ("q1", "Вопрос 1: Какая твоя любимая книга?"),
-    ("q2", "Вопрос 2: Сколько книг ты читаешь в год? (цифрой)"),
-    ("genres", "Вопрос 3: Любимые жанры? (через запятую, например: фантастика, классика)"),
-    ("length", "Вопрос 4: Какой объём предпочитаешь? (short/medium/long)"),
-    ("mood", "Вопрос 5: Какое настроение книг нравится? (cozy/dark/adventurous/умное/романтичное …)"),
-    ("lang", "Вопрос 6: На каком языке обычно читаешь? (ru/en/… )"),
-    ("format", "Вопрос 7: Формат? (ebook/audiobook/paper)"),
-]
-
+# ---------- Викторина ----------
 @dp.message_handler(lambda m: m.text == "🧩 Викторина")
 async def quiz_start(message: types.Message):
-    quiz_state[message.from_user.id] = {"step": 0}
-    await message.answer(QUESTS[0][1])
-
-@dp.message_handler(lambda m: message.from_user.id in quiz_state)  # type: ignore
-async def quiz_flow(message: types.Message):
     uid = message.from_user.id
-    if uid not in quiz_state:
-        return
+    quiz_state.pop(uid, None)
+    quiz_state[uid] = {"q": 1}
+    await send(message, "Вопрос 1: Какая твоя любимая книга?")
+
+@dp.message_handler(lambda m: quiz_state.get(m.from_user.id, {}).get("q") == 1)
+async def quiz_q1(message: types.Message):
+    uid = message.from_user.id
     st = quiz_state[uid]
-    idx = st.get("step", 0)
-    key, _ = QUESTS[idx]
+    st["q1"] = (message.text or "").strip()
+    st["q"] = 2
+    await send(message, "Вопрос 2: Сколько книг ты читаешь в год? (цифрой)")
 
-    text = message.text.strip()
-    # валидации
-    if key == "q2":
-        try:
-            int(text)
-        except:
-            await message.answer("Нужно число. Например: 5")
-            return
-
-    # сохраняем ответ
-    st[key] = text
-    idx += 1
-    if idx < len(QUESTS):
-        st["step"] = idx
-        await message.answer(QUESTS[idx][1])
-        return
-
-    # закончили опрос -> шлём в бэкенд и отдаём рекомендации
+@dp.message_handler(lambda m: quiz_state.get(m.from_user.id, {}).get("q") == 2)
+async def quiz_q2(message: types.Message):
+    uid = message.from_user.id
+    st = quiz_state[uid]
     try:
-        payload = {
-            "q1_favorite_book": st.get("q1"),
-            "q2_books_per_year": int(st.get("q2", "0") or 0),
-            "favorite_genres": [x.strip() for x in st.get("genres","").split(",") if x.strip()],
-            "preferred_length": st.get("length"),
-            "mood": st.get("mood"),
-            "language": st.get("lang"),
-            "format": st.get("format"),
-        }
-        r = requests.post(api(f"/users/{uid}/quiz"), json=payload, timeout=10)
+        n = int((message.text or "").strip())
+    except:
+        await send(message, "Нужно число. Например: 5")
+        return
+    try:
+        url = api(f"/users/{uid}/quiz")
+        payload = {"q1_favorite_book": st["q1"], "q2_books_per_year": n}
+        r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
-        # обновим профиль базовыми предпочтениями (жанры)
-        try:
-            requests.put(api(f"/users/{uid}/profile"), json={
-                "username": message.from_user.username,
-                "first_name": message.from_user.first_name,
-                "last_name": message.from_user.last_name,
-                "lang": payload.get("language") or "ru",
-                "preferred_genres": payload.get("favorite_genres", []),
-                "preferred_authors": [],
-            }, timeout=8)
-        except Exception:
-            pass
-
-        # сразу рекомендации без опроса
-        prefs = {
-            "user_id": uid,
-            "favorites": [payload["q1_favorite_book"]] if payload.get("q1_favorite_book") else [],
-            "genres": payload.get("favorite_genres", []),
-            "authors": [],
-        }
-        books = _recommend_with(prefs)
-        if books:
-            lines=[]
-            for b in books:
-                line = f"📖 {b.get('title')}"
-                if b.get("author"):
-                    line += f" — {b['author']}"
-                if b.get("reason"):
-                    line += f"\n🛈 {b['reason']}"
-                lines.append(line)
-            await message.answer("\n\n".join(lines), reply_markup=main_kb())
-        else:
-            await message.answer("Готово! Теперь нажми «📚 Рекомендации».", reply_markup=main_kb())
     except Exception as e:
-        await message.answer(f"Не удалось сохранить/получить данные викторины: {e}", reply_markup=main_kb())
+        await send(message, f"Не удалось сохранить результаты викторины: {e}")
     finally:
         quiz_state.pop(uid, None)
+    await send(message, "Готово! Теперь можешь нажать «📚 Рекомендации». Я буду учитывать твою любимую книгу.")
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
