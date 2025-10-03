@@ -4,6 +4,7 @@ import os
 DB_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DB_DIR, "app.db")
 
+
 async def init_db():
     os.makedirs(DB_DIR, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -23,7 +24,9 @@ async def init_db():
         )""")
         await db.commit()
 
-async def upsert_profile(user_id:int, username, lang, genres, authors):
+
+async def upsert_profile(user_id: int, username: str | None, lang: str | None,
+                         genres: list[str], authors: list[str]):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
         INSERT INTO profiles(user_id, username, lang, preferred_genres, preferred_authors)
@@ -36,11 +39,15 @@ async def upsert_profile(user_id:int, username, lang, genres, authors):
         """, (user_id, username, lang, ",".join(genres), ",".join(authors)))
         await db.commit()
 
-async def get_profile(user_id:int):
+
+async def get_profile(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, username, lang, preferred_genres, preferred_authors FROM profiles WHERE user_id=?", (user_id,))
+        cur = await db.execute(
+            "SELECT user_id, username, lang, preferred_genres, preferred_authors FROM profiles WHERE user_id=?",
+            (user_id,))
         row = await cur.fetchone()
-        if not row: return None
+        if not row:
+            return None
         return {
             "user_id": row[0],
             "username": row[1],
@@ -49,7 +56,8 @@ async def get_profile(user_id:int):
             "preferred_authors": row[4].split(",") if row[4] else [],
         }
 
-async def upsert_quiz(user_id:int, q1, q2):
+
+async def upsert_quiz(user_id: int, q1: str | None, q2: int | None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
         INSERT INTO quiz(user_id, q1_favorite_book, q2_books_per_year)
@@ -60,9 +68,17 @@ async def upsert_quiz(user_id:int, q1, q2):
         """, (user_id, q1, q2))
         await db.commit()
 
-async def get_quiz(user_id:int):
+
+async def get_quiz(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, q1_favorite_book, q2_books_per_year FROM quiz WHERE user_id=?", (user_id,))
+        cur = await db.execute(
+            "SELECT user_id, q1_favorite_book, q2_books_per_year FROM quiz WHERE user_id=?",
+            (user_id,))
         row = await cur.fetchone()
-        if not row: return None
-        return {"user_id": row[0], "q1_favorite_book": row[1], "q2_books_per_year": row[2]}
+        if not row:
+            return None
+        return {
+            "user_id": row[0],
+            "q1_favorite_book": row[1],
+            "q2_books_per_year": row[2]
+        }
