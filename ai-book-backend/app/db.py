@@ -37,21 +37,14 @@ async def upsert_profile(user_id:int, username, first_name, last_name, lang, gen
             lang=excluded.lang,
             preferred_genres=excluded.preferred_genres,
             preferred_authors=excluded.preferred_authors
-        """, (
-            user_id, username, first_name, last_name, lang,
-            ",".join(genres or []), ",".join(authors or [])
-        ))
+        """, (user_id, username, first_name, last_name, lang, ",".join(genres), ",".join(authors)))
         await db.commit()
 
 async def get_profile(user_id:int):
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("""
-            SELECT user_id, username, first_name, last_name, lang, preferred_genres, preferred_authors
-            FROM profiles WHERE user_id=?
-        """, (user_id,))
+        cur = await db.execute("SELECT user_id, username, first_name, last_name, lang, preferred_genres, preferred_authors FROM profiles WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
-        if not row:
-            return None
+        if not row: return None
         return {
             "user_id": row[0],
             "username": row[1],
@@ -77,6 +70,5 @@ async def get_quiz(user_id:int):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id, q1_favorite_book, q2_books_per_year FROM quiz WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
-        if not row:
-            return None
+        if not row: return None
         return {"user_id": row[0], "q1_favorite_book": row[1], "q2_books_per_year": row[2]}
