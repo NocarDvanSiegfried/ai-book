@@ -1,164 +1,143 @@
-import logging
-import os
-import json
-import requests
+# bot.py (фрагменты)
+
+import os, requests
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.dispatcher import FSMContext
 
-# --- ENV ---
 API_TOKEN = os.getenv("TELEGRAM_TOKEN")
-BACKEND_BASE = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
-if not API_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set")
-
-# --- Bot basics ---
-logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage())
+dp = Dispatcher(bot)
 
-# Храним последние рекомендации, чтобы по callback показывать пояснение
-# { user_id: [{"title":..,"author":..,"why":..}, ...] }
-last_recs = {}
-
-# --- Keyboards ---
-def main_menu_kb():
+# Клавиатура
+def main_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("📚 Рекомендации").add("🧩 Викторина").add("👤 Профиль")
+    kb.add("📚 Рекомендации", "🧩 Викторина", "👤 Профиль")
     return kb
 
-def info_button(i: int):
-    ikb = types.InlineKeyboardMarkup()
-    ikb.add(types.InlineKeyboardButton(text="🛈 Пояснение", callback_data=f"info:{i}"))
-    return ikb
-
-# --- States ---
-class RecoFSM(StatesGroup):
-    wait_books = State()
-    wait_genres = State()
-    wait_authors = State()
-
-class QuizFSM(StatesGroup):
-    q1 = State()
-    q2 = State()
-
-# --- Handlers ---
-
 @dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
-    await message.answer("Привет! Выбери действие:", reply_markup=main_menu_kb())
+async def start(message: types.Message):
+    await message.answer("Привет! Выбери действие:", reply_markup=main_kb())
 
+# ---------- Профиль ----------
+@dp.message_handler(lambda m: m.text == "👤 Профиль")
+async def profile_show(message: types.Message):
+    url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/profile"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            raise RuntimeError(r.text)
+        p = r.json()
+        txt = (
+            f"Профиль:\n"
+            f"Имя: {p.get('first_name') or '-'} {p.get('last_name') or ''}\n"
+            f"Язык: {p.get('lang') or 'ru'}\n"
+            f"Жанры: {', '.join(p.get('preferred_genres', [])) or '-'}\n"
+            f"Авторы: {', '.join(p.get('preferred_authors', [])) or '-'}"
+        )
+        await message.answer(txt)
+    except Exception as e:
+        await message.answer(f"Не удалось получить профиль: {e}")
+
+# Для простоты дадим команду сохранить предпочтения из текущей сессии рекомендаций:
+user_session = {}  # user_id -> dict
+
+# ---------- Рекомендации ----------
 @dp.message_handler(lambda m: m.text == "📚 Рекомендации")
-async def reco_start(message: types.Message, state: FSMContext):
-    await state.finish()
-    await RecoFSM.wait_books.set()
-    await message.answer(
-        "Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+async def rec_start(message: types.Message):
+    user_session[message.from_user.id] = {"step": "books"}
+    await message.answer("Напиши 2–3 любимые книги через запятую (например: Маленький принц, Дюна, Три товарища)")
 
-@dp.message_handler(state=RecoFSM.wait_books)
-async def reco_books(message: types.Message, state: FSMContext):
-    books = [x.strip() for x in message.text.split(",") if x.strip()]
-    await state.update_data(favorites=books)
-    await RecoFSM.wait_genres.set()
+@dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "books")
+async def rec_books(message: types.Message):
+    s = user_session[message.from_user.id]
+    s["favorites"] = [x.strip() for x in message.text.split(",") if x.strip()]
+    s["step"] = "genres"
     await message.answer("Окей! Теперь жанры (через запятую): фантастика, классика, детектив ...")
 
-@dp.message_handler(state=RecoFSM.wait_genres)
-async def reco_genres(message: types.Message, state: FSMContext):
-    genres = [x.strip() for x in message.text.split(",") if x.strip()]
-    await state.update_data(genres=genres)
-    await RecoFSM.wait_authors.set()
+@dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "genres")
+async def rec_genres(message: types.Message):
+    s = user_session[message.from_user.id]
+    s["genres"] = [x.strip() for x in message.text.split(",") if x.strip()]
+    s["step"] = "authors"
     await message.answer("И пару любимых авторов (через запятую), или '-' если нет:")
 
-@dp.message_handler(state=RecoFSM.wait_authors)
-async def reco_authors(message: types.Message, state: FSMContext):
-    authors = []
-    if message.text.strip() != "-":
-        authors = [x.strip() for x in message.text.split(",") if x.strip()]
-
-    data = await state.get_data()
-    favorites = data.get("favorites", [])
-    genres = data.get("genres", [])
-
+@dp.message_handler(lambda m: user_session.get(m.from_user.id, {}).get("step") == "authors")
+async def rec_authors(message: types.Message):
+    s = user_session[message.from_user.id]
+    s["authors"] = [] if message.text.strip() == "-" else [x.strip() for x in message.text.split(",") if x.strip()]
+    s["step"] = None
     await message.answer("Готовлю рекомендации…")
-
     try:
-        url = f"{BACKEND_BASE}/v1/users/{message.from_user.id}/recommendations"
-        payload = {"favorites": favorites, "genres": genres, "authors": authors}
-        resp = requests.post(url, json=payload, timeout=30)
-        if resp.status_code != 200:
-            await message.answer(f"Сервер вернул {resp.status_code}:\n{resp.text}")
-            await state.finish()
-            await message.answer("Вернулся в главное меню.", reply_markup=main_menu_kb())
-            return
-
-        data = resp.json()
+        url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/recommendations"
+        payload = {
+            "favorites": s.get("favorites", []),
+            "genres": s.get("genres", []),
+            "authors": s.get("authors", []),
+        }
+        r = requests.post(url, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"{r.status_code}: {r.text}")
+        data = r.json()
         books = data.get("books", [])
         if not books:
-            await message.answer("Пока нет рекомендаций 😕", reply_markup=main_menu_kb())
-            await state.finish()
+            await message.answer("Пока нечего посоветовать 😔")
             return
 
-        # сохраним на пользователя
-        last_recs[message.from_user.id] = books
+        # Сохраним профиль на бэкенде как предпочтения
+        prof_url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/profile"
+        _ = requests.put(prof_url, json={
+            "username": message.from_user.username,
+            "first_name": message.from_user.first_name,
+            "last_name": message.from_user.last_name,
+            "lang": "ru",
+            "preferred_genres": s.get("genres", []),
+            "preferred_authors": s.get("authors", []),
+        }, timeout=10)
 
-        # отправим по одной с кнопкой "🛈 Пояснение"
-        for i, b in enumerate(books):
-            title = b.get("title", "Без названия")
-            author = b.get("author", "Автор неизвестен")
-            await message.answer(f"📖 {title} — {author}", reply_markup=info_button(i))
-
-        await state.finish()
-        await message.answer("Готово! Можешь выбрать другое действие ↘️", reply_markup=main_menu_kb())
-
+        lines = []
+        for b in books:
+            line = f"📖 {b.get('title')}"
+            if b.get("author"):
+                line += f" — {b['author']}"
+            lines.append(line)
+        await message.answer("\n\n".join(lines))
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
-        await state.finish()
-        await message.answer("Вернулся в главное меню.", reply_markup=main_menu_kb())
+        await message.answer(f"Ошибка запроса: {e}")
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("info:"))
-async def on_info(call: types.CallbackQuery):
-    try:
-        idx = int(call.data.split(":")[1])
-        books = last_recs.get(call.from_user.id, [])
-        if 0 <= idx < len(books):
-            why = books[idx].get("why", "Без пояснения")
-            await call.answer()  # закрыть "часики"
-            await call.message.answer(f"🛈 {why}")
-        else:
-            await call.answer("Нет данных", show_alert=True)
-    except Exception:
-        await call.answer("Ошибка", show_alert=True)
+# ---------- Викторина ----------
+quiz_state = {}  # user_id -> {"q": int, "q1": str}
 
 @dp.message_handler(lambda m: m.text == "🧩 Викторина")
-async def quiz_start(message: types.Message, state: FSMContext):
-    await state.finish()
-    await QuizFSM.q1.set()
+async def quiz_start(message: types.Message):
+    quiz_state[message.from_user.id] = {"q": 1}
     await message.answer("Вопрос 1: Какая твоя любимая книга?")
 
-@dp.message_handler(state=QuizFSM.q1)
-async def quiz_q1(message: types.Message, state: FSMContext):
-    await state.update_data(fav_book=message.text.strip())
-    await QuizFSM.q2.set()
+@dp.message_handler(lambda m: quiz_state.get(m.from_user.id, {}).get("q") == 1)
+async def quiz_q1(message: types.Message):
+    st = quiz_state[message.from_user.id]
+    st["q1"] = message.text.strip()
+    st["q"] = 2
     await message.answer("Вопрос 2: Сколько книг ты читаешь в год? (цифрой)")
 
-@dp.message_handler(state=QuizFSM.q2)
-async def quiz_q2(message: types.Message, state: FSMContext):
-    # можно валидировать число, но оставим просто
-    await state.finish()
-    await message.answer("Супер! Теперь нажми «📚 Рекомендации» и получи подборку.", reply_markup=main_menu_kb())
+@dp.message_handler(lambda m: quiz_state.get(m.from_user.id, {}).get("q") == 2)
+async def quiz_q2(message: types.Message):
+    st = quiz_state[message.from_user.id]
+    try:
+        n = int(message.text.strip())
+    except:
+        await message.answer("Нужно число. Например: 5")
+        return
+    # сохраняем в бэкенд
+    try:
+        url = f"{BACKEND_URL}/v1/users/{message.from_user.id}/quiz"
+        payload = {"q1_favorite_book": st["q1"], "q2_books_per_year": n}
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            raise RuntimeError(r.text)
+    except Exception as e:
+        await message.answer(f"Не удалось сохранить результаты викторины: {e}")
+    finally:
+        quiz_state.pop(message.from_user.id, None)
 
-@dp.message_handler(lambda m: m.text == "👤 Профиль")
-async def profile(message: types.Message):
-    await message.answer("Скоро здесь появятся настройки профиля 🙂", reply_markup=main_menu_kb())
-
-# fallback
-@dp.message_handler()
-async def fallback(message: types.Message):
-    await message.answer("Выбери действие в меню ниже 👇", reply_markup=main_menu_kb())
-
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    await message.answer("Супер! Теперь нажми «📚 Рекомендации» и получи подборку.", reply_markup=main_kb())

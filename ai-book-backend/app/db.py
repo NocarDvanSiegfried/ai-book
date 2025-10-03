@@ -1,44 +1,68 @@
+import aiosqlite
 import os
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Float
-from datetime import datetime
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data.db")
+DB_DIR = os.path.join(os.path.dirname(__file__), "data")
+DB_PATH = os.path.join(DB_DIR, "app.db")
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
-AsyncSessionLocal = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-Base = declarative_base()
+async def init_db():
+    os.makedirs(DB_DIR, exist_ok=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            lang TEXT,
+            preferred_genres TEXT,
+            preferred_authors TEXT
+        )""")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS quiz (
+            user_id INTEGER PRIMARY KEY,
+            q1_favorite_book TEXT,
+            q2_books_per_year INTEGER
+        )""")
+        await db.commit()
 
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)             # tg id
-    username = Column(String, nullable=True)
-    first_name = Column(String, nullable=True)
-    last_name = Column(String, nullable=True)
-    lang = Column(String, nullable=True)
-    preferred_genres = Column(Text, nullable=True)
-    preferred_authors = Column(Text, nullable=True)
+async def upsert_profile(user_id:int, username, lang, genres, authors):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        INSERT INTO profiles(user_id, username, lang, preferred_genres, preferred_authors)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            lang=excluded.lang,
+            preferred_genres=excluded.preferred_genres,
+            preferred_authors=excluded.preferred_authors
+        """, (user_id, username, lang, ",".join(genres), ",".join(authors)))
+        await db.commit()
 
-class Book(Base):
-    __tablename__ = "books"
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    authors = Column(String, nullable=True)        # csv для простоты
-    year = Column(Integer, nullable=True)
-    language = Column(String, nullable=True)
-    genres = Column(String, nullable=True)         # csv
-    tags = Column(String, nullable=True)           # csv
-    description = Column(Text, nullable=True)
-    cover_url = Column(String, nullable=True)
-    rating = Column(Float, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+async def get_profile(user_id:int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id, username, lang, preferred_genres, preferred_authors FROM profiles WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row: return None
+        return {
+            "user_id": row[0],
+            "username": row[1],
+            "lang": row[2],
+            "preferred_genres": row[3].split(",") if row[3] else [],
+            "preferred_authors": row[4].split(",") if row[4] else [],
+        }
 
-class Recommendation(Base):
-    __tablename__ = "recommendations"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    book_id = Column(Integer, ForeignKey("books.id"))
-    rank = Column(Integer, nullable=True)
-    score = Column(Float, nullable=True)
-    reason = Column(Text, nullable=True)
+async def upsert_quiz(user_id:int, q1, q2):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        INSERT INTO quiz(user_id, q1_favorite_book, q2_books_per_year)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            q1_favorite_book=excluded.q1_favorite_book,
+            q2_books_per_year=excluded.q2_books_per_year
+        """, (user_id, q1, q2))
+        await db.commit()
+
+async def get_quiz(user_id:int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id, q1_favorite_book, q2_books_per_year FROM quiz WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row: return None
+        return {"user_id": row[0], "q1_favorite_book": row[1], "q2_books_per_year": row[2]}
