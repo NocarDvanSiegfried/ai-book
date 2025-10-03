@@ -1,24 +1,29 @@
 from fastapi import APIRouter, HTTPException
-from app.models import ProfileIn, ProfileOut
-from app.db import upsert_profile, get_profile
+from pydantic import BaseModel
+from app import db
 
-router = APIRouter(prefix="/v1/users", tags=["profile"])
+router = APIRouter(prefix="/v1", tags=["profile"])
 
-@router.get("/{user_id}/profile", response_model=ProfileOut)
-async def read_profile(user_id: int):
-    data = await get_profile(user_id)
-    if not data:
-        raise HTTPException(404, "profile not found")
-    return data
+class ProfileIn(BaseModel):
+    username: str | None = None
+    lang: str | None = "ru"
+    preferred_genres: list[str] = []
+    preferred_authors: list[str] = []
 
-@router.put("/{user_id}/profile", response_model=ProfileOut)
-async def write_profile(user_id: int, body: ProfileIn):
-    await upsert_profile(
+@router.post("/users/{user_id}/profile")
+async def upsert_user_profile(user_id: int, p: ProfileIn):
+    await db.upsert_profile(
         user_id=user_id,
-        username=body.username,
-        lang=body.lang,
-        genres=body.preferred_genres,
-        authors=body.preferred_authors
+        username=p.username,
+        lang=p.lang,
+        genres=p.preferred_genres,
+        authors=p.preferred_authors,
     )
-    data = await get_profile(user_id)
-    return data
+    return {"ok": True}
+
+@router.get("/users/{user_id}/profile")
+async def get_user_profile(user_id: int):
+    prof = await db.get_profile(user_id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return prof
