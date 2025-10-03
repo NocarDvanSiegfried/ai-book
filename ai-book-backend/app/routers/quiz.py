@@ -1,29 +1,21 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
-
 from app.db import upsert_quiz, get_quiz
 
 router = APIRouter(prefix="/v1", tags=["quiz"])
 
 class QuizIn(BaseModel):
-    q1_favorite_book: Optional[str] = None
-    q2_books_per_year: Optional[int] = None
+    q1_favorite_book: str
+    q2_books_per_year: int
 
-class QuizOut(BaseModel):
-    user_id: int
-    q1_favorite_book: Optional[str] = None
-    q2_books_per_year: Optional[int] = None
+@router.post("/users/{user_id}/quiz")
+async def save_quiz(user_id: int, body: QuizIn):
+    await upsert_quiz(user_id, body.q1_favorite_book, body.q2_books_per_year)
+    return {"ok": True}
 
-@router.post("/users/{user_id}/quiz", response_model=QuizOut)
-async def write_quiz(user_id: int, payload: QuizIn):
-    await upsert_quiz(user_id, payload.q1_favorite_book, payload.q2_books_per_year)
-    q = await get_quiz(user_id)
-    return QuizOut(**q)
-
-@router.get("/users/{user_id}/quiz", response_model=QuizOut)
+@router.get("/users/{user_id}/quiz")
 async def read_quiz(user_id: int):
-    q = await get_quiz(user_id)
-    if not q:
+    data = await get_quiz(user_id)
+    if not data:
         raise HTTPException(404, "Quiz not found")
-    return QuizOut(**q)
+    return data

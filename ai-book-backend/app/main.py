@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db import init_db
 from app.routers import recommendations, profile, quiz
 
-
 def create_app() -> FastAPI:
     app = FastAPI(title="AI Book Backend", version="1.0.0")
 
@@ -29,6 +28,5 @@ def create_app() -> FastAPI:
         await init_db()
 
     return app
-
 
 app = create_app()

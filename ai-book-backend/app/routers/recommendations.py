@@ -1,8 +1,6 @@
-import os, aiohttp, asyncio, json, re
-from typing import List, Optional
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+import os, aiohttp, asyncio, json, re
 
 router = APIRouter(prefix="/v1", tags=["recommendations"])
 
@@ -13,26 +11,24 @@ if not OPENROUTER_API_KEY:
     raise RuntimeError("OPENROUTER_API_KEY is not set")
 
 class BookPref(BaseModel):
-    favorites: List[str] = Field(default_factory=list)
-    genres:    List[str] = Field(default_factory=list)
-    authors:   List[str] = Field(default_factory=list)
+    favorites: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
+    authors: list[str] = Field(default_factory=list)
 
 class BookOut(BaseModel):
-    title:  str
-    author: Optional[str] = None
-    reason: Optional[str] = None
+    title: str
+    author: str | None = None
+    reason: str | None = None
 
 class RecResponse(BaseModel):
-    books: List[BookOut]
+    books: list[BookOut]
 
 PROMPT = (
-    "Ты книжный ассистент. Дай ровно 5 рекомендаций книг под вкусы пользователя.\n"
+    "Ты книжный ассистент. Дай 5 рекомендаций.\n"
     "Любимые книги: {favorites}\n"
     "Жанры: {genres}\n"
     "Авторы: {authors}\n"
-    "Ответ строго в формате JSON-массива, каждый элемент вида:\n"
-    "{{\"title\": \"...\", \"author\": \"...\", \"reason\": \"краткое объяснение почему выбрана\"}}\n"
-    "Без лишнего текста, без комментариев — только JSON."
+    "Ответ строго в JSON-массиве объектов: поля title, author, reason. Без лишнего текста."
 )
 
 async def _call_llm(prefs: BookPref) -> list[BookOut]:
@@ -41,7 +37,6 @@ async def _call_llm(prefs: BookPref) -> list[BookOut]:
         genres=", ".join(prefs.genres) or "-",
         authors=", ".join(prefs.authors) or "-",
     )
-
     async with aiohttp.ClientSession() as session:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -50,14 +45,12 @@ async def _call_llm(prefs: BookPref) -> list[BookOut]:
         payload = {
             "model": OPENROUTER_MODEL,
             "messages": [
-                {"role": "system", "content": "Отвечай строго по формату."},
+                {"role": "system", "content": "Отвечай кратко и по делу."},
                 {"role": "user", "content": prompt_text},
             ],
         }
-        async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers, json=payload, timeout=90
-        ) as resp:
+        async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                headers=headers, json=payload, timeout=60) as resp:
             if resp.status >= 400:
                 txt = await resp.text()
                 raise HTTPException(502, f"LLM HTTP {resp.status}: {txt}")
@@ -65,34 +58,27 @@ async def _call_llm(prefs: BookPref) -> list[BookOut]:
 
     content = data["choices"][0]["message"]["content"]
 
-    # Пробуем вытащить JSON даже если модель обернула текстом
+    # Достаём JSON даже если модель добавила текст
     match = re.search(r"\[.*\]", content, re.S)
     raw = match.group(0) if match else content
-
-    arr: list = []
     try:
         arr = json.loads(raw)
-        if not isinstance(arr, list):
-            raise ValueError("LLM returned non-list JSON")
     except Exception:
-        # Запасной парсер — разбор по строкам
+        # резерв: возьмём первые строки как названия
         lines = [l.strip("-• \n") for l in content.splitlines() if l.strip()]
         arr = [{"title": l} for l in lines[:5]]
 
     out: list[BookOut] = []
-    for item in arr:
-        if isinstance(item, dict):
-            title  = str(item.get("title") or "").strip()
-            author = (item.get("author") or None)
-            reason = (item.get("reason") or None)
+    for it in arr:
+        if isinstance(it, dict):
+            title = (it.get("title") or "").strip()
+            if not title:
+                continue
+            author = (it.get("author") or None)
+            reason = (it.get("reason") or None)
         else:
-            title, author, reason = str(item), None, None
-
-        if not title:
-            continue
+            title, author, reason = str(it).strip(), None, None
         out.append(BookOut(title=title, author=author, reason=reason))
-
-    # гарантируем ровно до 5
     return out[:5]
 
 @router.post("/users/{user_id}/recommendations", response_model=RecResponse)
